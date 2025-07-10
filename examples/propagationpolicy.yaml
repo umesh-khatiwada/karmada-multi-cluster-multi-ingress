@@ -1,0 +1,46 @@
+   apiVersion: policy.karmada.io/v1alpha1
+   kind: PropagationPolicy
+   metadata:
+     name: nginx-policy2
+   spec:
+     resourceSelectors:
+     - apiVersion: apps/v1
+       kind: Deployment
+       name: nginx-deployment-233
+     placement:
+       clusterAffinity:
+         clusterNames:
+           - kind-white123
+           - kind-member3
+
+#apiVersion: policy.karmada.io/v1alpha1
+#kind: PropagationPolicy
+#metadata:
+#  name: nginx-policy-2
+#  namespace: default
+#spec:
+#  placement:
+#    clusterTolerations:
+#    - effect: NoExecute
+#      key: cluster.karmada.io/not-ready
+#      operator: Exists
+#      tolerationSeconds: 300
+#    - effect: NoExecute
+#      key: cluster.karmada.io/unreachable
+#      operator: Exists
+#      tolerationSeconds: 300
+#    clusterAffinity:
+#      clusterNames:
+#      - kind-whitelotus
+#      - kind-01cloud
+#      - kind-member-cluster
+#    spreadConstraints:
+#      - maxGroups: 2
+#        minGroups: 1
+#    replicaScheduling:
+#      replicaSchedulingType: Duplicated
+#  resourceSelectors:
+#  - apiVersion: apps/v1
+#    kind: Deployment
+#    name: nginx-deployment-23
+#    namespace: default

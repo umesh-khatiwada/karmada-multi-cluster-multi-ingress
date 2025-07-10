@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+  name: karmada
+  namespace: karmada-system
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: karmada.staging.01cloud.dev
+    http:
+      paths:
+      - backend:
+          service:
+            name: karmada-apiserver
+            port:
+              number: 5443
+        path: /
+        pathType: ImplementationSpecific
+  tls:
+  - hosts:
+    - karmada.staging.01cloud.dev
+    secretName: zerone-tls-cert

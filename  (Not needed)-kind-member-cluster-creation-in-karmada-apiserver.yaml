@@ -1,0 +1,42 @@
+apiVersion: cluster.karmada.io/v1alpha1
+kind: Cluster
+metadata:
+  name: kind-member-cluster
+spec:
+  syncMode: Pull
+  apiEndpoint: https://127.0.0.1.27:42079
+  secretRef:
+    name: member-cluster
+    namespace: karmada-system
+  insecureSkipTLSVerification: true
+---
+#apiVersion: cluster.karmada.io/v1alpha1
+#kind: Cluster
+#metadata:
+#  name: kind-member-cluster
+#spec:
+#  syncMode: Push
+#  apiEndpoint: https://127.0.0.1.27:42079
+#  impersonatorSecretRef:
+#    name: kind-member-cluster-impersonator
+#    namespace: karmada-cluster
+#  secretRef:
+#    name: member-kubeconfig
+#    namespace: karmada-system
+#  insecureSkipTLSVerification: true
+
+apiVersion: cluster.karmada.io/v1alpha1
+kind: Cluster
+metadata:
+  name: kind-whitelotus
+spec:
+  syncMode: Pull
+  apiEndpoint:  https://127.0.0.1:42727
+  impersonatorSecretRef:
+    name: kind-whitelotus-impersonator
+    namespace: karmada-systemw
+  secretRef:
+    name: kind-whitelotus
+    namespace: karmada-system
+  insecureSkipTLSVerification: true
+
