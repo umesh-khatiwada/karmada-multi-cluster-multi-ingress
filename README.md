@@ -1,15 +1,66 @@
-# Install Karmada Control Plane
-**Github :** https://github.com/karmada-io/karmada
+# Karmada Multi-Cluster Setup with a Shared Ingress
 
-```
+A step-by-step guide to installing the [Karmada](https://github.com/karmada-io/karmada) control plane with Helm, exposing its API server through an NGINX Ingress, and joining a Kind member cluster in **agent** (pull) mode so workloads can be propagated to it.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+- [Repository Structure](#repository-structure)
+- [Step 1: Install the Karmada Control Plane](#step-1-install-the-karmada-control-plane)
+- [Step 2: Expose karmada-apiserver with an Ingress](#step-2-expose-karmada-apiserver-with-an-ingress)
+- [Step 3: Extract the Karmada kubeconfig](#step-3-extract-the-karmada-kubeconfig)
+- [Step 4: Install the Karmada Agent on a Member Cluster](#step-4-install-the-karmada-agent-on-a-member-cluster)
+- [Step 5: Propagate a Workload](#step-5-propagate-a-workload)
+- [Configuration Reference](#configuration-reference)
+- [Troubleshooting](#troubleshooting)
+- [Security Notes](#security-notes)
+- [References](#references)
+- [License](#license)
+- [Author](#author)
+
+## Overview
+
+1. Install Karmada core components (API server, scheduler, controller-manager, ...) in the `karmada-system` namespace of a host cluster.
+2. Publish `karmada-apiserver` through an NGINX Ingress using SSL passthrough, so member clusters can reach it by hostname.
+3. Install the Karmada agent (`installMode: "agent"`) on a member cluster, pointing it at the Ingress hostname.
+4. Create a `PropagationPolicy` and a Deployment in the Karmada API server to schedule workloads onto member clusters.
+
+## Prerequisites
+
+- A host Kubernetes cluster with an NGINX Ingress controller (the Ingress uses `ingressClassName: nginx`).
+- A member cluster (the guide uses Kind clusters).
+- `kubectl`, `helm`, and optionally `yq` / `jq` for extracting the kubeconfig.
+- A DNS name for the Karmada API server and a TLS secret for it. The examples use a placeholder hostname; replace `karmada.example.com` and the TLS secret name with your own.
+- The Karmada Helm chart. The guide installs it from `./charts/karmada` (a checkout of the Karmada repository); the repository also contains `karmada-0.0.0.tgz`. TODO: confirm which chart source the author intends.
+
+## Repository Structure
+
+| Path | Description |
+|------|-------------|
+| `README.md` | This guide |
+| `karmada-ingress.yml` | Ingress for `karmada-apiserver` (port 5443, SSL passthrough, backend protocol HTTPS) |
+| `values.yaml` | Helm values for the Karmada agent (`installMode: "agent"`); contains kubeconfig material and must be filled in with your own values (see [Security Notes](#security-notes)) |
+| `rbac.yaml` | ClusterRoleBinding granting `cluster-admin` to `system:anonymous` (see [Security Notes](#security-notes)) |
+| `examples/propagationpolicy.yaml` | Example `PropagationPolicy` (also contains commented-out alternatives) |
+| `examples/workload-test.yml` | Example nginx Deployment used with the policy |
+| `karmada-0.0.0.tgz` | Packaged Karmada Helm chart |
+| `(Not needed)-kind-member-*.yaml` | Earlier `Cluster` / impersonator Secret examples for registering member clusters in push mode; marked "Not needed" by the author |
+
+## Step 1: Install the Karmada Control Plane
+
+```bash
 helm repo add karmada-charts https://raw.githubusercontent.com/karmada-io/karmada/master/charts
 helm install karmada -n karmada-system --create-namespace --dependency-update ./charts/karmada
-
 ```
-     This will install Karmada core components like Karmada API server, scheduler, controller-manager, etc., in the karmada-system namespace.
 
-#### Create the karmada-apiserver Ingress:
-```
+This installs the Karmada API server, scheduler, controller-manager and related components in the `karmada-system` namespace.
+
+## Step 2: Expose karmada-apiserver with an Ingress
+
+Apply `karmada-ingress.yml` (edit the host and TLS secret first):
+
+```yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -20,7 +71,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-  - host: karmada.staging.01cloud.dev
+  - host: karmada.example.com
     http:
       paths:
       - backend:
@@ -32,159 +83,101 @@ spec:
         pathType: ImplementationSpecific
   tls:
   - hosts:
-    - karmada.staging.01cloud.dev
-    secretName: zerone-tls-cert
-```
-- > Note (in case of any issues):
-```
-    nginx.ingress.kubernetes.io/upstream-vhost: karmada-apiserver.karmada-system.svc
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-buffer-size: 8k
-    nginx.ingress.kubernetes.io/proxy-buffers-number: "4"
-    nginx.ingress.kubernetes.io/proxy-ssl-verify: "off"
-    nginx.ingress.kubernetes.io/rewrite-target: /
-    nginx.ingress.kubernetes.io/secure-backends: "true"
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    - karmada.example.com
+    secretName: <your-tls-secret>
 ```
 
-##### During the Karmada Helm chart deployment, a secret containing the karmada-mapiserver kubeconfig is created. Extract this kubeconfig file, which is used to configure the karmada-apiserver context.
+If you run into issues, the author's notes suggest these additional annotations:
 
-######   Extract the Base64 Encoded Kubeconfig:
-
--  There are several ways to achieve this:
-
--  **Using kubectl and yq (recommended if you have yq installed) :**
+```yaml
+nginx.ingress.kubernetes.io/upstream-vhost: karmada-apiserver.karmada-system.svc
+nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+nginx.ingress.kubernetes.io/proxy-buffer-size: 8k
+nginx.ingress.kubernetes.io/proxy-buffers-number: "4"
+nginx.ingress.kubernetes.io/proxy-ssl-verify: "off"
+nginx.ingress.kubernetes.io/rewrite-target: /
+nginx.ingress.kubernetes.io/secure-backends: "true"
+nginx.ingress.kubernetes.io/ssl-redirect: "true"
 ```
-m```
 
-**Explanation :**
+## Step 3: Extract the Karmada kubeconfig
 
-- **kubectl get secret karmada-kubeconfig -n karmada-system -o jsonpath='{.data.kubeconfig}' :** This extracts the value of the kubeconfig key from the data field of the secret, which is the base64 encoded kubeconfig.
-- **base64 -d :** This command decodes the base64 string.
-- **karmada.config :** This redirects the decoded output to a file named karmada.config.
- 
+The Helm deployment creates a secret (`karmada-kubeconfig` in `karmada-system`) holding the Karmada API server kubeconfig. Decode it to a file:
 
-**Using kubectl and jq (if you have jq installed) :**
-
-```
+```bash
+# kubectl + jq
 kubectl get secret karmada-kubeconfig -n karmada-system -o json | jq -r '.data.kubeconfig' | base64 -d > karmada.config
+
+# kubectl only (jsonpath)
+kubectl get secret karmada-kubeconfig -n karmada-system -o jsonpath='{.data.kubeconfig}' | base64 -d > karmada.config
 ```
 
-**Explanation :**
+(On macOS use `base64 -D`.) Check the file:
 
-- **kubectl get secret karmada-kubeconfig -n karmada-system -o json :**  Retrieves the secret in JSON format. 
-- **jq -r '.data.kubeconfig' :** Parses the JSON and extracts the kubeconfig value (raw, without - quotes).
-- **base64 -d :** Decodes the base64 string.
-- **karmada.config :** Redirects the decoded output to the karmada.config file.
-
-
- **Using kubectl, sed, and awk (more manual but works without extra tools) :**
-```
-kubectl get secret karmada-kubeconfig -n karmada-system -o yaml | sed -n '/kubeconfig:/,$p' | awk '{if(NR>1)print}' | tr -d ' ' | base64 -d > karmada.config
-```
-
-**Explanation :**
-
-- **kubectl get secret karmada-kubeconfig -n karmada-system -o yaml :** Gets the secret in YAML format.
-- **sed -n '/kubeconfig:/,$p' :** Extracts lines from kubeconfig: to the end of the file.
-- **awk '{if(NR>1)print}' :** Skips the first line (which is kubeconfig:)
-- **tr -d ' ':** Removes leading spaces.
-- **base64 -d :** Decodes the base64 string.
-- **karmada.config :** Saves the decoded content to karmada.config.
-
-###### Verify the File (Optional):
-
-- You can verify that the karmada.config file is a valid kubeconfig file by using the kubectl command with the --kubeconfig flag:
-```
+```bash
 kubectl --kubeconfig=karmada.config config view
 ```
 
-Important Notes:
+The kubeconfig points at the in-cluster address `https://karmada-apiserver.karmada-system.svc.cluster.local:5443`. Replace the `server:` value with your Ingress URL (`https://karmada.example.com`), then verify:
 
-- **base64 -d :** The base64 -d command might be slightly different depending on your operating system. On macOS, you might need to use base64 -D.
-- **yq and jq :** These are powerful command-line tools for processing YAML and JSON data. If you don't have them, you can usually install them with your system's package manager (e.g., apt-get install yq jq, brew install yq jq).
-- **Security**: Be mindful of where you store your karmada.config file, as it contains credentials to access your Karmada control plane.
-
-Inside the karamada.config file, you can find the following information:
+```bash
+export KUBECONFIG=karmada.config
+kubectl config get-contexts
 ```
-apiVersion: v1
-clusters:
-- cluster: 
-    certificate-authority-data: xxx
-  server:  https://karmada-apiserver.karmada-system.svc.cluster.local:5443
-contexts:
-- context:
-    cluster: karmada-apiserver
-    user: karmada-apiserver
-  name: karmada-apiserver
-current-context: karmada
-kind: Config
-preferences: {}
-users:
-- name: karmada-apiserver
-  user: 
-    client-certifiticate-date: xxx
-    client-key-data: xxx
-    name: karmada-apiserver
 
- ```
-Here, we the need to use the endpoints in the kubeconfig file to access the Karmada API server.
-  i.e "https://karmada.staging.01cloud.dev" in place of "https://karmada-apiserver.karmada-system.svc.cluster.local:5443"
+Treat `karmada.config` as a credential; do not commit it.
 
-Verify karmada-apiserver after the server is updated:
-  
-    export KUBECONFIG=karmada.config
-    kubectl config get-contexts 
+## Step 4: Install the Karmada Agent on a Member Cluster
 
+Create a `values.yaml` for the agent (use the values from `karmada.config`; never commit real ones):
 
-# Install Karmada Agent
-
-    helm install karmada karmada/karmada --namespace karmada-system --create-namespace -f values.yaml
-
-- **values.yaml**
-
-```
+```yaml
 installMode: "agent"
 agent:
-  clusterName: "kind-whitelotus"   # Name of the member cluster
-  clusterEndpoint: "https://127.0.0.1:46339" # Member cluster endpoint
-  ## kubeconfig of the karmada-apiserver 
+  clusterName: "kind-whitelotus"              # name of the member cluster
+  clusterEndpoint: "https://127.0.0.1:46339"  # member cluster endpoint
   kubeconfig:
-    caCrt: |                      # Certificate Authority Data
+    caCrt: |                                  # certificate-authority-data from karmada.config
       -----BEGIN CERTIFICATE-----
       xxx
       -----END CERTIFICATE-----
-    crt: |                        # Client Certificate Data
+    crt: |                                    # client-certificate-data
       -----BEGIN CERTIFICATE-----
       xxx
       -----END CERTIFICATE-----
-    key: |                        # Client Key Data
+    key: |                                    # client-key-data
       -----BEGIN RSA PRIVATE KEY-----
       xxx
       -----END RSA PRIVATE KEY-----
-    server: "https://karmada.staging.01cloud.dev"
-
+    server: "https://karmada.example.com"
 ```
 
-- This installs the Karmada agent on the Kind cluster, allowing it to receive workloads scheduled by Karmada. 
+Install it against the member cluster:
 
-Verify in Karmada host cluster
+```bash
+helm install karmada karmada/karmada --namespace karmada-system --create-namespace -f values.yaml
 ```
+
+Verify from the Karmada side; the member cluster should show as a member with status `Ready`:
+
+```bash
 export KUBECONFIG=karmada.config
-kubectl config get-contexts 
+kubectl config get-contexts
 kubectl get clusters
 ```
-You should see "kind-whitelotus" listed as a member cluster with status "Ready".
 
-- > Verify Karmada mode:Agent
-```
-export KUBECONFIG=whitelotus.config
-kubectl get pods -n karmada-system  
+Verify the agent on the member cluster:
+
+```bash
+export KUBECONFIG=whitelotus.config   # member cluster kubeconfig
+kubectl get pods -n karmada-system
 ```
 
+## Step 5: Propagate a Workload
 
-Create the Propagation Policy
-```
+Apply these to the Karmada API server (see `examples/`):
+
+```yaml
 apiVersion: policy.karmada.io/v1alpha1
 kind: PropagationPolicy
 metadata:
@@ -199,8 +192,8 @@ spec:
       clusterNames:
         - kind-member3
 ```
-Create a workload in the whitelotus cluster
-```
+
+```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -221,4 +214,43 @@ spec:
         image: nginx:1.14.2
         ports:
         - containerPort: 80
-```      
+```
+
+Make sure `clusterNames` in the policy matches the member cluster name you registered. The repository examples use different names and resource names than this snippet (`examples/propagationpolicy.yaml` uses `nginx-deployment-233` and `kind-white123` / `kind-member3`), so keep policy and Deployment names consistent.
+
+## Configuration Reference
+
+| Setting | Where | Meaning |
+|---------|-------|---------|
+| `installMode` | agent `values.yaml` | `agent` installs only the Karmada agent on a member cluster |
+| `agent.clusterName` | agent `values.yaml` | Name under which the member cluster registers |
+| `agent.clusterEndpoint` | agent `values.yaml` | API endpoint of the member cluster |
+| `agent.kubeconfig.caCrt` / `crt` / `key` | agent `values.yaml` | CA, client certificate and key used to talk to karmada-apiserver |
+| `agent.kubeconfig.server` | agent `values.yaml` | Public URL of karmada-apiserver (the Ingress host) |
+| `ssl-passthrough` | Ingress annotation | Lets TLS terminate at karmada-apiserver (port 5443) |
+
+## Troubleshooting
+
+- Ingress or TLS problems: try the extra annotations listed in [Step 2](#step-2-expose-karmada-apiserver-with-an-ingress).
+- Wrong server address: the generated kubeconfig uses the in-cluster service address; replace it with the Ingress URL.
+- Member cluster not listed: check `kubectl get pods -n karmada-system` on the member cluster and `kubectl get clusters` against Karmada. TODO: no further troubleshooting is documented in the repository.
+
+## Security Notes
+
+- `values.yaml` and the `(Not needed)-...impersonator.yaml` file hold certificate/key and token material. Never commit real credentials; treat anything that was committed as compromised and rotate it.
+- `rbac.yaml` binds `system:anonymous` to `cluster-admin`, which gives unauthenticated users full cluster access. Do not apply it to any cluster you care about.
+- Keep `karmada.config` private.
+
+## References
+
+- [Karmada](https://github.com/karmada-io/karmada)
+- [Karmada documentation](https://karmada.io/docs/)
+- [Kind](https://kind.sigs.k8s.io/)
+
+## License
+
+No license file is included. The repository bundles a packaged copy of the Apache-2.0 licensed Karmada chart (`karmada-0.0.0.tgz`); TODO: the owner should decide on a license for the original content.
+
+## Author
+
+[Umesh Khatiwada](https://github.com/umesh-khatiwada)
